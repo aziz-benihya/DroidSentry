@@ -1,0 +1,531 @@
+# Agentic Dynamic Assessment Architecture
+
+## Purpose and current scope
+
+Sprint D completes a bounded assessment workflow above the accepted Sprint
+C2/C3 mobile evidence runtime. GPT-5.5 (or the deterministic reference provider)
+produces structured intent only. Django validates policy, records explicit
+auditor approval, executes an immutable approved projection through the existing
+gateway, resolves evidence with deterministic rules, recalculates deterministic
+scores, and renders an auditable report. The model cannot execute tools,
+perform autonomous pentesting, create findings, assign risk, confirm
+vulnerabilities, or produce malware verdicts.
+
+An authenticated Analyst or Admin can request one of two objectives:
+
+- `DEVICE_READINESS_CHECK`: device status followed by a screenshot.
+- `BASIC_APP_INTERACTION_CHECK`: status, optional verified APK installation,
+  launch, screenshot, bounded UI/log evidence, optional caller-supplied tap and
+  text, and force stop.
+
+Tap coordinates and text are never invented. Missing optional actions are
+persisted as `SKIPPED` with an explicit reason.
+
+## Architecture
+
+```text
+Auditor (session authentication + CSRF)
+    |
+    v
+Django plan API (RBAC + audit-authorized target)
+    |
+    v
+Planner provider (OpenAI GPT-5.5 or deterministic local provider)
+    |
+    v
+Strict plan schema + backend policy validator
+    |
+    v
+Persistent GENERATED -> VALIDATED -> APPROVED plan
+    |
+    v
+ApprovedAssessmentPlan v1 -> bounded Assessment Executor -> AgentRun
+    |
+    v
+Existing Tool Gateway -> C2 mobile / C3 Frida capabilities
+    |
+    v
+Bounded observations -> artifacts -> evidence
+    |
+    v
+Deterministic runtime rules -> findings -> risk/compliance -> report
+    |
+    v
+Optional adaptive recommendation -> new validation + new auditor approval
+
+Existing deterministic execution remains separate:
+
+Browser (fixed objective input only)
+    |
+    v
+Django run API (RBAC, audit/APK ownership, typed input validation)
+    |
+    v
+Agent Controller (deterministic objective plan)
+    |
+    +--> Internal Controller
+    |
+    +--> Ephemeral Container Sandbox
+             |
+             v
+       Run-scoped Django Tool Gateway
+             |
+             v
+Django Host-Agent Client (host token remains backend-only)
+    |
+    v
+Allowlisted Host Agent actions -> Managed Android Emulator
+```
+
+The browser chooses an objective, runtime enum, authorized audit/app target,
+and bounded optional interaction values. It cannot choose a tool list, command,
+executable, filesystem path, container image, environment variable, or prompt.
+
+The container calls only
+`POST /api/dynamic/agent/runs/{id}/tool-call/`. Its short-lived run credential is
+stored by Django only as a digest and is bound to one run. Before each action,
+Django checks the token, expiry, run state, persisted step order, tool name, and
+exact resolved arguments. Values derived at runtime are limited to the package
+name returned by `install_verified_apk` and the collector ID returned by
+`start_logcat`.
+
+## Deterministic mobile tool manifest
+
+The backend manifest contains only:
+
+1. `get_device_status`
+2. `list_packages`
+3. `install_verified_apk`
+4. `launch_package`
+5. `force_stop_package`
+6. `clear_package_data`
+7. `take_screenshot`
+8. `start_logcat`
+9. `stop_logcat`
+10. `get_logcat_excerpt`
+11. `dump_ui`
+12. `tap_coordinates`
+13. `type_text`
+14. `frida_status`
+15. `frida_ps`
+16. `frida_setup`
+17. `frida_attach`
+18. `frida_run_js`
+
+Every schema rejects unknown fields. Package names use a strict Android package
+regex. APK installation accepts IDs only, verifies that the APK belongs to the
+audit, requires a `VERIFIED` object, checks size/signature/SHA-256, and then
+reuses the backend-to-host APK byte stream. No local path crosses the browser or
+sandbox boundary.
+
+`clear_package_data` requires `confirm=true` and an Analyst/Admin requester. It
+is deliberately absent from the current deterministic objectives. Uninstall is
+not in the agent tool manifest.
+
+Coordinates are numeric and bounded twice: the backend applies a hard schema
+limit and the host agent checks the reported device dimensions when available.
+Text is limited to 128 characters, rejects controls and shell metacharacters,
+uses fixed ADB argv, and is persisted only as length plus a redacted preview.
+
+## Evidence primitives
+
+- Screenshot: bounded PNG metadata, dimensions, size, digest, and capture time.
+- UI hierarchy: bounded XML processing, node count, redacted visible-text and
+  resource-ID samples, bounded raw preview, focused package, and XML digest.
+- Logcat: bounded completed capture, package PID filter when available, at most
+  100 excerpt lines returned to the objective, and redaction status.
+
+The Sprint C2 logcat implementation is a completed bounded capture, not a live
+collector. It returns a real collector ID for excerpt lookup. `stop_logcat`
+truthfully returns `supported=false` and `stopped=false` for that completed
+capture rather than faking success.
+
+These records are evidence primitives only. Instrumentation screenshots are
+stored in the evidence bucket through `ObjectStorageReference`; PostgreSQL
+stores only their bounded metadata, digests, and linkage. Raw huge XML/log
+output is not exposed by default.
+
+## Sprint C3 real Frida instrumentation
+
+The Frida tools use the managed emulator serial and fixed host-agent argv only.
+`frida_status` requires a real `frida-ps` RPC enumeration and, when the target
+is running, a real in-process attach probe. Binary presence alone cannot produce
+PASS. `frida_setup` records before state, fixed setup actions, after state, and
+post-setup RPC verification. Client/server versions must agree.
+
+`frida_run_js` is the only code-bearing action. Its bounded JavaScript is sent
+to the selected Android application through Frida; it is never interpreted as
+a host command. Script size, timeout, event count/size, logcat, and screenshot
+capture are bounded. Analyst custom scripts require explicit confirmation and
+are redacted from persisted objective and step inputs after execution.
+
+The built-in `Frida — Runtime UI Modification Proof` is backend-owned and uses
+a fixed sentinel in the deterministic plan. Django resolves that sentinel to
+the canonical JavaScript; the sandbox cannot substitute source. The proof
+launches the target, captures before screenshot/UI evidence, verifies Frida and
+attach, changes the focused Activity title on Android's UI thread, requires the
+structured `ui_modification` event, captures after screenshot/UI evidence and
+bounded PID-filtered logcat, compares digests, then force-stops the app. A proof
+run cannot succeed without both the successful event and a changed screenshot.
+
+Each proof/custom run also creates a bounded instrumentation evidence record
+containing run/package/PID/device/version/script metadata, timing, attach and
+event/error counts, before/after digests, logcat digest/summary, interpretation,
+and limitations. This proves runtime instrumentation, not a vulnerability.
+
+## Security boundaries
+
+- Host-agent authentication remains only in Django's backend client. It is
+  never passed to the browser or sandbox.
+- Host actions use fixed argv and `shell=False`; there is no arbitrary command,
+  path, process, ADB, or environment inspection tool.
+- Responses, package lists, UI values, XML previews, log lines, text, timeouts,
+  and coordinates are bounded and normalized before persistence.
+- Every executed or skipped step is audited. Destructive and navigation actions
+  additionally create host-agent action records when a managed device exists.
+- Viewer is read-only. Only Analyst/Admin can create runs. Django sessions,
+  CSRF middleware, django-axes, and existing RBAC remain enabled.
+- The sandbox remains non-root, read-only, unprivileged, capability-free, and
+  resource bounded, without mounts, Docker socket, host network, repository,
+  SSH, Git, database, MinIO, or host-agent credentials.
+- The sandbox receives only run ID, gateway URL, run token, fixed objective, and
+  the validated bounded objective input required to reproduce the plan.
+
+## Sprint D AI assessment planner
+
+`AssessmentPlan` stores the audit, authorized package, objective, scope,
+provider/model identity, generated and normalized JSON, planner-input hash,
+plan hash, lifecycle state, validation result, and timestamps.
+`AssessmentPlanStep` stores a stable identifier, deterministic sequence,
+rationale, structured tool references and arguments, expected observation,
+success condition, bounded evidence requirements, dependencies, and state.
+
+The planner capability source is the existing `TOOL_MANIFEST`; no second tool
+registry exists. Provider output is strict JSON and is rejected before plan
+creation when it contains unknown fields/tools, malformed tool arguments,
+unauthorized packages/APKs, dependency cycles, excessive steps/evidence,
+arbitrary Frida source, shell/path/environment/Docker/credential instructions,
+or unsupported/unbounded behavior. The only Frida JavaScript a generated plan
+may reference is the backend-owned built-in proof sentinel. The provider is not
+given OpenAI-hosted tools or an MSAP execution endpoint.
+
+The backend builds bounded planner context from persisted MSAP data only. The
+`trusted_control` object contains audit identity, authorized package, auditor
+objective/scope, backend policy, and the public schemas of the real gateway
+manifest. The separately labeled `untrusted_observations` object contains
+bounded APK metadata, findings, evidence snippets, and persisted device data.
+Application-derived strings are always data, are size bounded, and have common
+credential forms redacted. Unavailable context is explicit. Planning never
+queries or mutates the emulator. Only a SHA-256 of the sanitized planner input
+is persisted; API credentials and raw prompts are not stored.
+
+The OpenAI provider uses the Responses API with the backend-selected model and
+strict `text.format` JSON-schema output, disables provider storage for the
+request, and does not supply tools. Provider/model/key/timeout/retry
+configuration is backend-only. The default economy profile uses
+`gpt-5.6-luna`; balanced and advanced profiles are separately allowlisted.
+Local development and tests default to `DETERMINISTIC`, which produces the same
+validated six-step AndroGoat-compatible plan without an API key.
+
+Plan API lifecycle:
+
+1. Analyst/Admin creates a structurally and policy-checked `GENERATED` plan.
+2. Analyst/Admin explicitly promotes it to `VALIDATED`; policy is rerun.
+3. Analyst/Admin approves it, producing `APPROVED` state only.
+4. Analyst/Admin may explicitly execute the immutable approved contract.
+5. Viewer can inspect plans and execution evidence but cannot mutate them.
+
+Approval never creates an `AgentRun`, calls the run-scoped gateway, contacts the
+host agent, or changes emulator state. The separate Execute Assessment action
+consumes only the approved contract and remains behind the existing gateway and
+policy boundaries.
+
+### Sprint D1 planner/executor contracts
+
+Provider output is untrusted planner **intent**, not executor input. Existing
+deterministic/provider output is accepted through a compatibility adapter, then
+normalized into the closed `msap.assessment-plan/v1` contract. That canonical
+document contains provider/model and audit traceability, the authorized package,
+objective and scope, fixed plan constraints, and ordered steps. Each canonical
+step has a stable identifier and sequence, one of the supported action types,
+structured tool references and arguments, dependencies, evidence and success
+requirements, an explicit destructive-step approval flag, and resource limits
+derived from the real `TOOL_MANIFEST` timeouts.
+
+The normalization path is deliberately one-way:
+
+```text
+raw provider JSON
+    -> legacy intent schema validation
+    -> contextual plan policy validation
+    -> msap.assessment-plan/v1 normalization
+    -> canonical contract validation + SHA-256
+    -> persisted plan
+    -> auditor validation and approval
+    -> msap.approved-assessment-plan/v1 projection (only executor input)
+```
+
+The approved executor projection can be built only from a persisted
+`AssessmentPlan` whose state is `APPROVED`, whose validation state is `PASSED`,
+whose approval actor/time exist, and whose canonical JSON still matches the
+persisted plan hash and audit/package/provider fields. It contains no raw
+provider response. Passing arbitrary LLM text to this boundary is rejected; D1
+does not parse text into execution requests.
+
+Validation boundaries remain distinct:
+
+- **Schema/contract validation** closes fields, types, identifiers, tool
+  capability vocabulary, arguments, dependencies, sizes, evidence values,
+  action types, and manifest-derived resource bounds. Host command/path,
+  credential, environment, Docker, subprocess, and arbitrary Frida-source
+  representations have no executable contract shape.
+- **Plan policy validation** checks the selected audit and authorized package,
+  package/audit arguments, the built-in-only planner Frida proof, and explicit
+  destructive scope. D3 may extend this layer without changing either contract.
+- **Approval** records auditor authorization for the canonical plan. It does not
+  authorize an individual tool invocation or cause execution.
+- **Execution authorization** is enforced again for every run and tool call.
+  Persisted step order, RBAC/scope policy, the real gateway manifest schema,
+  approved arguments, and backend/host-agent enforcement remain mandatory.
+
+A recognized tool identifier therefore expresses a requested capability only;
+it is never a permission. The model is neither the schema, policy, approval, nor
+execution security boundary. The deterministic planner remains the local/test
+fallback, compatibility reference, and safe end-to-end executor fixture.
+
+### Sprint D2/D3 GPT planner and production policy
+
+The existing `OpenAIPlannerProvider` is the sole OpenAI integration. An
+Analyst/Admin may select `OPENAI` or `DETERMINISTIC` through the existing plan
+create API; the choice is a closed enum and never accepts a key, endpoint, model
+name, prompt, or tool list. When omitted, the backend environment selects the
+provider. Model selection is restricted to the backend-defined economy,
+balanced, and advanced profiles; the browser never supplies an arbitrary model.
+
+The OpenAI request contains one fixed backend system instruction and one JSON
+context document. The system instruction makes the following precedence
+explicit:
+
+1. Backend system instruction and `trusted_control` define the planning task.
+2. `untrusted_observations` is attacker-influenceable data only.
+3. APK strings, finding descriptions, evidence/UI/logcat/Frida text, and other
+   application content cannot change scope, add tools, request secrets, or
+   become commands—even when they contain prompt-injection wording.
+
+The synchronous Responses call has a bounded per-attempt timeout, response byte
+limit, plan byte limit, output-token limit, and zero-to-two configured retries.
+Only timeouts, connection failures, rate limits, and selected transient HTTP
+failures are retried. Refusals, incomplete responses, duplicate/malformed JSON,
+unexpected response shapes, schema failures, and policy failures fail closed
+without deterministic substitution. Provider failure bodies and refusal text
+are not returned or logged.
+
+After strict provider output parsing, D3 policy verifies the persisted audit,
+audit-owned package/APK, exact objective and scope, package/audit arguments,
+built-in-only planner Frida source, and explicit destructive scope. Structural
+validation independently enforces the real manifest vocabulary/argument
+schemas, dependency graph, evidence and size bounds, and prohibited command,
+path, credential, environment, Docker, direct-AgentRun, direct-gateway, and
+gateway-bypass representations. A plan persists only after both layers pass.
+
+`AssessmentPlan.validation_status` and `policy_status` expose those separate
+results. Safe `provider_metadata` may contain only response ID, provider status,
+latency, retry count, and bounded token counts. It never contains prompts,
+responses, keys, Authorization headers, or provider error bodies. Security logs
+record provider/model, latency, retry count, and result codes without recording
+application context or secrets.
+
+### Bounded approved-plan execution
+
+The MVP execution agent consumes only a persisted
+`msap.approved-assessment-plan/v1` snapshot. Before creating a run, Django
+rechecks approval actor/time, schema and policy status, contract version, plan
+hash, audit existence, audit-owned package, current tool manifest, resource
+bounds, RBAC, and runtime availability. The plan is linked one-to-one with its
+`AgentRun`; a second execution of the same approval is rejected.
+
+```text
+ApprovedAssessmentPlan v1
+    -> immutable execution snapshot
+    -> plan-linked AgentRun + exact AgentRunSteps
+    -> Celery worker (sequential)
+    -> existing execute_run_tool_call gateway
+    -> existing C2/C3 mobile capability
+    -> bounded untrusted observation
+    -> AgentRunArtifact / ObjectStorageReference
+    -> linked Evidence
+```
+
+Canonical tools are flattened in plan and tool order. Before any capability is
+called, the materialized run must still match every approved plan-step ID,
+sequence, tool index, tool name, exact argument object, dependency, evidence
+requirement, retry bound, and manifest timeout. Tool-free planner steps become
+bounded control observations and never invoke a model or tool. Added steps,
+changed arguments, target changes, stale authorization, or changed hashes fail
+closed.
+
+The existing Tool Gateway is the only capability boundary. It revalidates the
+approved snapshot and live audit/package authorization, claims the exact next
+step, bounds total calls, and invokes only `TOOL_MANIFEST` implementations. The
+execution service has no subprocess, ADB, Docker, filesystem, Python-evaluation,
+or Frida CLI interface. Built-in Frida proof calls retain all C3 restrictions.
+
+Execution is sequential. A failed tool blocks later tools in the same plan step
+and every dependent step. Only transient host-connectivity failures are retried,
+at most once by default. Invalid arguments, policy/authorization failures,
+unknown capabilities, integrity failures, and security violations are never
+retried. Manifest timeouts, a 600-second default total deadline, tool/artifact
+counts, observation/artifact byte limits, and cooperative cancellation bound the
+run.
+
+Results are normalized as `msap.agent-observation/v1` and labeled
+`UNTRUSTED_APPLICATION_OBSERVATION`. Secret-shaped values are redacted;
+oversized output retains a bounded preview and digest. Observations are data and
+cannot add steps or become instructions. Existing object storage retains large
+artifacts; PostgreSQL retains references, hashes, sizes, bounded summaries, and
+evidence provenance linking audit, plan hash, run, run step, artifact, and tool.
+
+Execution creates evidence, not verdicts. Post-run processing invokes the
+existing deterministic rule, scoring, and report layers; application or model
+text is never a finding condition.
+
+### Deterministic evidence, findings, scores, and reports
+
+After a successful, failed, or timed-out approved-plan run, MSAP evaluates only
+closed runtime conditions over structured gateway observations. The initial
+runtime catalog records: a structured controlled `ui_modification` Frida event,
+a zero-node UI evidence limitation, and incomplete run coverage. These records
+are informational/manual-review findings, not vulnerabilities. Stable
+`MSAP-DYN-*` rule IDs and the existing `(audit, rule_id)` uniqueness constraint
+deduplicate repeated runs. Linked `Evidence` retains run, step, artifact, hash,
+plan hash, and deterministic-rule provenance.
+
+The existing risk service remains authoritative. Informational runtime records
+carry zero risk weight; substantive existing deterministic findings continue to
+drive risk. MASVS compliance remains derived from persisted MASVS
+`RuleEvaluation` records. GPT-5.5 does not assign severity, confidence, risk, or
+compliance.
+
+The existing JSON/PDF report now includes bounded approved-run metadata:
+authorized target, objective/scope, provider/model, approval and plan hash,
+execution timing, ordered capabilities, step state/retries, artifact metadata,
+evidence metadata, linked deterministic findings, scores, and limitations.
+Artifact bytes and full logs/UI XML are referenced rather than embedded.
+Credential-shaped values are redacted. The report explicitly separates AI
+planning, approved execution, untrusted observations, deterministic findings,
+and deterministic scoring.
+
+### Bounded adaptive assessment between runs
+
+Adaptive assessment is a recommendation boundary, not mid-run replanning:
+
+```text
+Completed AgentRun
+    -> bounded/redacted evidence + artifact metadata + observations
+    -> GPT-5.5 or deterministic planner
+    -> new AssessmentPlan candidate
+    -> schema validation + policy validation
+    -> auditor review + explicit approval
+    -> optional new AgentRun
+```
+
+`AssessmentPlan.plan_kind`, `parent_plan`, `source_run`, and `adaptive_cycle`
+provide lineage. One completed run can produce at most one recommendation, and
+the database plus backend configuration cap the lineage at two cycles. The
+candidate must preserve audit, target, objective, and scope, use the current
+manifest, and receive a new canonical hash. It is persisted as `GENERATED`; it
+cannot create a run until the normal validate and approve transitions occur.
+
+Adaptive context labels all run/application observations as untrusted data and
+includes only bounded evidence previews, screenshot/artifact metadata, step
+observations, and deterministic finding summaries. It excludes raw bytes,
+object keys, host paths, environment references, authorization material, and
+credentials. No planner-to-planner recursion, automatic approval, automatic
+execution, or unrestricted autonomous loop exists.
+
+## Bounded adaptive assessment within a run
+
+Adaptive execution is an additional mode; it does not replace the sequential
+`ApprovedAssessmentPlan v1` executor or between-run recommendations.
+
+```text
+Auditor-approved AssessmentPlan strategy
+    -> immutable msap.agent-capability-envelope/v1
+    -> bounded AssessmentAgent state
+    -> one msap.agent-action-decision/v1
+    -> schema + policy + budget + replay validation
+    -> existing run-scoped Tool Gateway
+    -> existing bounded mobile capability
+    -> untrusted observation + artifact + Evidence
+    -> deterministic oracle
+    -> hypothesis + coverage update
+    -> next bounded decision
+```
+
+The envelope records the approved plan/hash, audit, package, objective, scope,
+plan-derived adaptive-safe capabilities, per-capability argument policy,
+hypothesis families, destructive/additional-approval classifications, bounded
+resource limits, and an integrity hash. Plan or envelope drift fails closed.
+
+`AgentActionDecision` persists only concise auditor-facing summaries, expected
+observations, evidence goals, safe provider metadata, integrity hashes,
+validation/policy/execution state, and observation provenance. It never stores
+chain-of-thought, credentials, Authorization headers, or arbitrary provider
+output. `TOOL_ACTION`, `COMPLETE`, and `NEEDS_AUDITOR` are the only types.
+
+The capability intersection is:
+
+```text
+approved strategy
+∩ backend adaptive-safe policy
+∩ current TOOL_MANIFEST
+∩ audit authorization
+∩ target authorization
+```
+
+Destructive setup/data-reset/install capabilities remain unavailable to the
+adaptive loop. `frida_run_js` remains restricted to the existing built-in
+controlled proof identifier. UI input requires recent evidence that the
+authorized target is foregrounded.
+
+The backend hypothesis catalog enables only evidence families supported by the
+actual envelope: sensitive logging, parsed UI exposure, controlled runtime
+tampering evidence, and runtime stability. Network/TLS, local storage, and
+authentication are `NOT_ASSESSABLE_WITH_CURRENT_CAPABILITIES` unless bounded
+tools provide those observations. Only deterministic oracles and rules may
+create findings, severity, risk, MASVS scoring, or reports.
+
+Trust-boundary responsibilities remain separate:
+
+- **Planner:** creates the assessment strategy.
+- **Assessment Agent:** chooses the next safe experiment inside the envelope.
+- **Backend policy:** decides whether that experiment is permitted now.
+- **Tool Gateway:** authorizes and executes the exact persisted call.
+- **Oracle:** decides what supported evidence means.
+- **Finding engine:** creates deterministic evidence-backed findings and scores.
+- **Auditor:** approves strategy and any future destructive escalation.
+
+The model chooses **what safe experiment to try next**. The backend decides
+**whether it is permitted**. The gateway authorizes **the exact call**. The
+oracle decides **what the evidence supports**.
+
+## Remaining limitations
+
+- Approved-plan execution uses Celery and status polling. Cancellation is
+  cooperative between calls and cannot interrupt a host operation in progress.
+- Approved-plan execution currently runs in the backend execution worker. The
+  existing container sandbox remains available for C1/C2/C3 objectives but has
+  not yet been extended to consume the approved-plan contract.
+- Logcat uses bounded completed captures rather than live streaming sessions.
+- Package list version metadata is returned only when the host can obtain it;
+  unavailable values remain empty/null.
+- Full UI XML and unbounded log streams are intentionally not retained.
+- No recursive replanning, chat UI, autonomous tool discovery, vulnerability
+  confirmation, or malware verdict is implemented. Within-run adaptation is
+  bounded by one approved envelope; between-run planning remains capped at two
+  separately approved cycles.
+- Dynamic rule coverage is intentionally small and evidence-oriented. It does
+  not replace a future expanded deterministic mobile rule catalog or auditor
+  validation.
+- An approved plan executes once. A rerun requires a newly generated, validated,
+  and approved plan so evidence remains tied to immutable authorization.
