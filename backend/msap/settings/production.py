@@ -1,0 +1,9 @@
+from .base import *  # noqa: F403
+
+
+DEBUG = False
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SECURE = env_bool("SESSION_COOKIE_SECURE", True)  # noqa: F405
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SECURE = env_bool("CSRF_COOKIE_SECURE", True)  # noqa: F405
+CSRF_COOKIE_SAMESITE = "Lax"

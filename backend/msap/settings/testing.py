@@ -1,0 +1,24 @@
+from .base import *  # noqa: F403
+
+
+DEBUG = False
+MSAP_ENVIRONMENT = "testing"
+MSAP_SOURCE_INDEX_ENABLED = False
+PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": ":memory:",
+    }
+}
+CELERY_TASK_ALWAYS_EAGER = True
+CELERY_TASK_EAGER_PROPAGATES = True
+AXES_ENABLED = False
+MSAP_ASSESSMENT_PLANNER_PROVIDER = "DETERMINISTIC"
+MSAP_ASSESSMENT_PLANNER_OPENAI_API_KEY = ""
+MSAP_AGENT_DECISION_PROVIDER = "DETERMINISTIC"
+# The deterministic reference sequence intentionally exercises more actions
+# than the cost-controlled production Luna profile before emitting COMPLETE.
+MSAP_AGENT_MAX_DECISIONS = 24
+MSAP_AGENT_MAX_TOOL_CALLS = 24
+MSAP_AGENT_MAX_PROVIDER_CALLS = 24
